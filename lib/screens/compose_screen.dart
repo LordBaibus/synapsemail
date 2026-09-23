@@ -125,9 +125,27 @@ class _ComposeScreenState extends State<ComposeScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _HeaderBadge(isReply: _isReply, recipient: replyTo?.senderEmail),
-                const SizedBox(height: 16),
+                if (!_isReply) ...[
+                  _HeaderBadge(isReply: _isReply, recipient: replyTo?.senderEmail),
+                  const SizedBox(height: 16),
+                ],
                 if (replyTo != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4, bottom: 8),
+                    child: Row(
+                      children: [
+                        const Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 13, color: _accentBright),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'Replying to ${replyTo.senderEmail}',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _accentBright),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   _QuotedMessage(email: replyTo, accent: _accent, accentBright: _accentBright),
                   const SizedBox(height: 16),
                 ],
@@ -139,13 +157,14 @@ class _ComposeScreenState extends State<ComposeScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      GlassTextField(
-                        placeholder: 'To',
-                        controller: _toController,
-                        enabled: !_isReply,
-                        prefixIcon: const Icon(CupertinoIcons.at, size: 18, color: Colors.white54),
-                      ),
-                      const SizedBox(height: 12),
+                      if (!_isReply) ...[
+                        GlassTextField(
+                          placeholder: 'To',
+                          controller: _toController,
+                          prefixIcon: const Icon(CupertinoIcons.at, size: 18, color: Colors.white54),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       GlassTextField(
                         placeholder: 'Subject',
                         controller: _subjectController,
@@ -204,9 +223,10 @@ class _ComposeScreenState extends State<ComposeScreen> {
   }
 }
 
-/// Small glowing badge above the form, naming what this screen is for
-/// (reply vs. new message) so the screen reads with more presence than a
-/// bare app-bar title.
+/// Small glowing badge above the form for a brand-new message, naming
+/// what this screen is for so it reads with more presence than a bare
+/// app-bar title. Not shown when replying - the quoted message below
+/// already makes clear who this is going to.
 class _HeaderBadge extends StatelessWidget {
   final bool isReply;
   final String? recipient;
@@ -291,7 +311,7 @@ class _QuotedMessage extends StatelessWidget {
         children: [
           Container(
             width: 3,
-            height: 40,
+            height: 20,
             decoration: BoxDecoration(
               color: accentBright,
               borderRadius: BorderRadius.circular(4),
@@ -299,30 +319,11 @@ class _QuotedMessage extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(CupertinoIcons.arrowshape_turn_up_left_fill, size: 12, color: accentBright),
-                    const SizedBox(width: 5),
-                    Expanded(
-                      child: Text(
-                        email.senderEmail,
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: accentBright),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  email.preview,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13, color: Colors.white70, height: 1.35),
-                ),
-              ],
+            child: Text(
+              email.preview,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, color: Colors.white70, height: 1.35),
             ),
           ),
         ],

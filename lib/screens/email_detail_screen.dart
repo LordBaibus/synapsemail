@@ -266,6 +266,10 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
     if (_isLoading) {
       return Skeletonizer(
         enabled: true,
+        effect: ShimmerEffect(
+          baseColor: Colors.white.withValues(alpha: 0.14),
+          highlightColor: Colors.white.withValues(alpha: 0.24),
+        ),
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           children: [
@@ -355,10 +359,21 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                GlassIconButton(
-                  icon: CupertinoIcons.arrow_up,
+                GlassButton.custom(
+                  onTap: _isSending ? () {} : _sendReply,
+                  width: 44,
+                  height: 44,
+                  shape: const LiquidRoundedSuperellipse(borderRadius: 22),
                   glowColor: _accentBright,
-                  onPressed: _isSending ? null : _sendReply,
+                  child: DecoratedBox(
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _accentBright,
+                    ),
+                    child: const SizedBox.expand(
+                      child: Icon(CupertinoIcons.paperplane_fill, color: Colors.black, size: 18),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -411,14 +426,13 @@ class _MessageBubble extends StatelessWidget {
               shape: LiquidRoundedSuperellipse(
                 borderRadius: 18,
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(18),
                   color: alignRight ? accent.withValues(alpha: 0.28) : Colors.white.withValues(alpha: 0.05),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.all(2),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -624,7 +638,7 @@ class _BubbleSkeleton extends StatelessWidget {
           width: 220,
           height: 54,
           decoration: BoxDecoration(
-            color: Colors.white24,
+            color: Colors.white.withValues(alpha: 0.10),
             borderRadius: BorderRadius.circular(18),
           ),
         ),

@@ -171,6 +171,10 @@ class InboxScreenState extends State<InboxScreen> {
       ),
       child: Skeletonizer(
         enabled: _isLoading,
+        effect: ShimmerEffect(
+          baseColor: Colors.white.withValues(alpha: 0.14),
+          highlightColor: Colors.white.withValues(alpha: 0.24),
+        ),
         child: RefreshIndicator(
           onRefresh: _loadEmails,
           child: _buildList(_isLoading ? _placeholderEmails : _emails),
