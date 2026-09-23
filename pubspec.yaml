@@ -1,0 +1,41 @@
+name: email_app
+description: "A Gmail-like email client with a Liquid Glass UI."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Networking - all backend communication goes through HTTP (per requirement).
+  http: ^1.2.2
+
+  # Loading skeletons for ListView.generate-based lists (inbox/sent lists).
+  # Pinned to 3.x: 1.4.x's Canvas shim predates Flutter's newer
+  # clipRSuperellipse/drawRSuperellipse Canvas methods and fails to compile
+  # on recent Flutter SDKs.
+  skeletonizer: ^3.0.0
+
+  # iOS 26 "Liquid Glass" widget kit - used as the main UI toolkit instead of
+  # building raw material widgets.
+  liquid_glass_widgets: 0.2.1-dev.8
+
+  # Local session/token persistence (auth token, logged-in user).
+  shared_preferences: ^2.3.2
+
+  # Relative timestamps ("2m ago", "Yesterday") for the inbox list.
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
