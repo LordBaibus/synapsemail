@@ -1,4 +1,4 @@
-  workflows:
+workflows:
   ios-workflow:
     name: Email App - iOS Build (unsigned, sideload via AltStore)
     max_build_duration: 60
