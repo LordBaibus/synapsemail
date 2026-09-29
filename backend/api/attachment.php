@@ -4,11 +4,18 @@
  * downloading an image/file from a message), after confirming the current
  * user was a sender or recipient of the email it belongs to.
  *
- * GET attachment.php?id=<attachment id>
- * Auth via the same Bearer token as every other endpoint - but since this
- * returns raw file bytes (not JSON), errors are also plain text/JSON with
- * a non-200 status rather than the usual respond() JSON envelope, so a
+ * GET attachment.php?id=<attachment id>&token=<optional, see below>
+ * Auth via the same Bearer token as every other endpoint when the caller
+ * can send one (the in-app image thumbnails do) - but since this returns
+ * raw file bytes (not JSON), errors are also plain text/JSON with a
+ * non-200 status rather than the usual respond() JSON envelope, so a
  * failed request doesn't get treated as a valid file.
+ *
+ * Also accepts the token as ?token=<token> (via requireAuthFromRequest)
+ * for the two call sites that hand this URL to something outside our own
+ * HTTP client and can't attach a header: opening a non-image file in the
+ * device's own viewer (url_launcher, LaunchMode.externalApplication), and
+ * any platform image loader that doesn't support custom headers.
  */
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/helpers.php';
@@ -29,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 header('Access-Control-Allow-Origin: *');
 
 $conn = getDbConnection();
-$user = requireAuth($conn);
+$user = requireAuthFromRequest($conn);
 
 $attachmentId = (int) ($_GET['id'] ?? 0);
 if ($attachmentId <= 0) {
@@ -38,7 +45,8 @@ if ($attachmentId <= 0) {
 }
 
 $stmt = $conn->prepare(
-    'SELECT a.original_name, a.stored_name, a.mime_type, a.email_id, e.sender_email, e.recipient_email
+    'SELECT a.original_name, a.stored_name, a.mime_type, a.email_id,
+            e.sender_email, e.recipient_email, e.cc, e.bcc
      FROM attachments a
      JOIN emails e ON e.id = a.email_id
      WHERE a.id = ?
@@ -54,7 +62,15 @@ if ($result->num_rows === 0) {
 }
 
 $row = $result->fetch_assoc();
-$isParticipant = $row['sender_email'] === $user['email'] || $row['recipient_email'] === $user['email'];
+
+// Cc/Bcc are stored as comma-separated strings (see EmailMessage._splitAddresses
+// on the Flutter side) - a Cc'd or Bcc'd participant (or an extra "To"
+// recipient, which rides along as Cc - see compose_screen.dart's _send())
+// is just as entitled to view the attachment as the sender/primary
+// recipient, but was previously getting a 403 here.
+$ccList = array_map('trim', explode(',', (string) ($row['cc'] ?? '')));
+$bccList = array_map('trim', explode(',', (string) ($row['bcc'] ?? '')));
+$isParticipant = in_array($user['email'], [$row['sender_email'], $row['recipient_email'], ...$ccList, ...$bccList], true);
 if (!$isParticipant) {
     http_response_code(403);
     exit('Forbidden');

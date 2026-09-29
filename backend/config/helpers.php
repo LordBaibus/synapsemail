@@ -68,6 +68,46 @@ function generateToken(): string {
     return bin2hex(random_bytes(32));
 }
 
+/**
+ * Same check as requireAuth(), but also accepts the token as a `?token=`
+ * query parameter when no Authorization header is present.
+ *
+ * Only attachment.php uses this. Everywhere else the app can always attach
+ * a real Authorization header (it controls the HTTP request), but two
+ * attachment-viewing paths hand the URL to something that doesn't support
+ * custom headers - Image.network's <img>-like network image loader on some
+ * platforms, and url_launcher's LaunchMode.externalApplication, which opens
+ * the link in the device's own browser/PDF viewer/etc. as a plain URL with
+ * no way to inject a header. A query-token is the standard way to
+ * authenticate a "hand this link to another app" request (the same pattern
+ * S3 presigned URLs, Google Drive share links, etc. use).
+ */
+function requireAuthFromRequest(mysqli $conn): array {
+    $headers = getallheaders();
+    $authHeader = $headers['Authorization'] ?? $headers['authorization'] ?? '';
+
+    if (preg_match('/Bearer\s+(.+)/i', $authHeader, $matches)) {
+        $token = $matches[1];
+    } else {
+        $token = trim((string) ($_GET['token'] ?? ''));
+    }
+
+    if ($token === '') {
+        respond(false, 'Missing or invalid Authorization header', [], 401);
+    }
+
+    $stmt = $conn->prepare('SELECT id, full_name, email FROM users WHERE auth_token = ? LIMIT 1');
+    $stmt->bind_param('s', $token);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($result->num_rows === 0) {
+        respond(false, 'Invalid or expired session, please log in again', [], 401);
+    }
+
+    return $result->fetch_assoc();
+}
+
 // ============================================================
 // Attachments
 // ============================================================

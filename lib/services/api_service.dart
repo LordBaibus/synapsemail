@@ -354,10 +354,10 @@ class ApiService {
     return '${utc.year}-${pad(utc.month)}-${pad(utc.day)} ${pad(utc.hour)}:${pad(utc.minute)}:${pad(utc.second)}';
   }
 
-  /// URL to fetch one attachment's raw bytes (for previewing an image or
-  /// downloading a file) - the caller must add the Authorization header
-  /// itself (see [attachmentHeaders]) since this is used directly in
-  /// things like Image.network.
+  /// URL to fetch one attachment's raw bytes (for previewing an image
+  /// in-app) - the caller must add the Authorization header itself (see
+  /// [attachmentHeaders]) since this is used directly in things like
+  /// Image.network.
   Uri attachmentUri(int attachmentId) =>
       _uri('attachment.php', {'id': '$attachmentId'});
 
@@ -365,6 +365,23 @@ class ApiService {
   /// can't await inside its build method) - call this once (e.g. in
   /// initState) and cache the result.
   Future<Map<String, String>> attachmentHeaders() => _headers(auth: true);
+
+  /// URL to fetch one attachment for opening OUTSIDE the app (a non-image
+  /// file handed to the device's own viewer/browser via url_launcher's
+  /// LaunchMode.externalApplication). That external app makes its own
+  /// plain HTTP request with no way for us to attach an Authorization
+  /// header, so the session token rides along as a query parameter instead
+  /// (backend/api/attachment.php's requireAuthFromRequest() accepts
+  /// either). Never use this for anything rendered inside our own app -
+  /// [attachmentUri] + [attachmentHeaders] keeps the token out of the URL
+  /// there, which is the better place for it whenever a header is possible.
+  Future<Uri> attachmentDownloadUri(int attachmentId) async {
+    final token = await _sessionStore.getToken();
+    return _uri('attachment.php', {
+      'id': '$attachmentId',
+      if (token != null) 'token': token,
+    });
+  }
 
   Future<void> deleteEmail(int id) async {
     final response = await http.post(

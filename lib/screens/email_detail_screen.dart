@@ -698,13 +698,23 @@ class _AttachmentFileChip extends StatelessWidget {
     return CupertinoIcons.doc;
   }
 
+  /// Opening this in the device's own viewer/browser (LaunchMode.
+  /// externalApplication) means that external app makes its own plain HTTP
+  /// request - it can't carry the Authorization header our own app would
+  /// normally send, which is exactly why this was failing with "Missing or
+  /// invalid Authorization header" instead of actually opening the file.
+  /// attachmentDownloadUri() embeds the session token in the URL itself
+  /// instead, which the backend also accepts (see
+  /// backend/config/helpers.php's requireAuthFromRequest()).
+  Future<void> _open() async {
+    final uri = await apiService.attachmentDownloadUri(attachment.id);
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () => launchUrl(
-        apiService.attachmentUri(attachment.id),
-        mode: LaunchMode.externalApplication,
-      ),
+      onTap: _open,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
