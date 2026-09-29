@@ -51,6 +51,22 @@ dependencies:
   # viewer/browser when tapped in the thread view.
   url_launcher: ^6.3.2
 
+  # Powers the "Save"/"Share" action on a photo or attachment: hands the
+  # downloaded file bytes to the OS share sheet, which is what actually
+  # lets the user pick "Save Image"/"Save to Files" - a plain URL can't do
+  # that since it doesn't carry our app's auth, and file_picker only reads
+  # files, it doesn't write/export them.
+  share_plus: ^10.1.4
+
+  # share_plus's ShareParams takes a list of XFile - this is the package
+  # XFile actually lives in (share_plus builds on it but doesn't re-export
+  # the class itself, so it needs its own explicit dependency/import).
+  cross_file: ^0.3.4+2
+
+  # Temp-directory path for the file this app writes right before handing
+  # it to share_plus (share_plus needs a real file on disk, not just bytes).
+  path_provider: ^2.1.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

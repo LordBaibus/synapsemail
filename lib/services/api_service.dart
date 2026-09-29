@@ -383,6 +383,23 @@ class ApiService {
     });
   }
 
+  /// Downloads one attachment's raw bytes, authenticated the normal way
+  /// (Authorization header - this request is made by our own app, not
+  /// handed off to another one, so there's no need for the query-token
+  /// trick [attachmentDownloadUri] uses). Used for the "Save"/"Share"
+  /// action: share_plus needs real bytes on disk to hand to the OS share
+  /// sheet, not just a URL.
+  Future<List<int>> downloadAttachmentBytes(int attachmentId) async {
+    final response = await http.get(
+      attachmentUri(attachmentId),
+      headers: await attachmentHeaders(),
+    );
+    if (response.statusCode != 200) {
+      throw ApiException('Could not download this attachment');
+    }
+    return response.bodyBytes;
+  }
+
   Future<void> deleteEmail(int id) async {
     final response = await http.post(
       _uri('delete.php'),

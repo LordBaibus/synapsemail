@@ -1,7 +1,11 @@
+import 'dart:io';
+import 'package:cross_file/cross_file.dart';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
@@ -559,6 +563,29 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
+/// Downloads an attachment's bytes (authenticated) and hands them to the
+/// OS share sheet, from which the user can pick "Save Image"/"Save to
+/// Files" or share it to another app - this is what actually lets someone
+/// keep a copy of a photo or file, rather than just viewing it in-app.
+/// Shows a brief SnackBar on failure (e.g. no connection).
+Future<void> _saveOrShareAttachment(BuildContext context, EmailAttachment attachment) async {
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    final bytes = await apiService.downloadAttachmentBytes(attachment.id);
+    final tempDir = await getTemporaryDirectory();
+    final file = File('${tempDir.path}/${attachment.originalName}');
+    await file.writeAsBytes(bytes);
+    await SharePlus.instance.share(
+      ShareParams(files: [XFile(file.path, mimeType: attachment.mimeType)]),
+    );
+  } catch (_) {
+    if (!context.mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Could not save this attachment. Check your connection.')),
+    );
+  }
+}
+
 /// Attachments carried by a single message bubble: image attachments show
 /// as tappable thumbnails (fetched from the authenticated attachment
 /// endpoint), everything else shows as a small file chip with name and
@@ -672,6 +699,13 @@ class _AttachmentImageViewer extends StatelessWidget {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(attachment.originalName, overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            icon: const Icon(CupertinoIcons.share),
+            tooltip: 'Save or share',
+            onPressed: () => _saveOrShareAttachment(context, attachment),
+          ),
+        ],
       ),
       body: Center(
         child: InteractiveViewer(
@@ -713,36 +747,53 @@ class _AttachmentFileChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: _open,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.18),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: accentBright.withValues(alpha: 0.3)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(_icon, size: 16, color: accentBright),
-            const SizedBox(width: 8),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 160),
-              child: Text(
-                attachment.originalName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
-              ),
+    // The "open" tap area and the "save" icon are siblings, not nested
+    // GestureDetectors - nesting two tap handlers over the same pixels is
+    // ambiguous in Flutter's gesture arena, so they're kept side by side
+    // in this Row instead.
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: accentBright.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            onTap: _open,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(_icon, size: 16, color: accentBright),
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 160),
+                  child: Text(
+                    attachment.originalName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  attachment.formattedSize,
+                  style: const TextStyle(fontSize: 10.5, color: Colors.white54),
+                ),
+              ],
             ),
-            const SizedBox(width: 6),
-            Text(
-              attachment.formattedSize,
-              style: const TextStyle(fontSize: 10.5, color: Colors.white54),
-            ),
-          ],
-        ),
+          ),
+          IconButton(
+            icon: Icon(CupertinoIcons.share, size: 15, color: accentBright),
+            tooltip: 'Save or share',
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+            onPressed: () => _saveOrShareAttachment(context, attachment),
+          ),
+        ],
       ),
     );
   }
