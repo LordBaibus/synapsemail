@@ -18,7 +18,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   AppUser? _user;
   bool _isLoggingOut = false;
 
-  static const _accent = Color(0xFF6C5CE7);
   static const _accentBright = Color(0xFF00E5FF);
 
   static const _popSettings = LiquidGlassSettings(
@@ -56,15 +55,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget build(BuildContext context) {
     final user = _user;
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: RadialGradient(
-          center: const Alignment(0, -0.7),
-          radius: 1.5,
-          colors: [_accent.withValues(alpha: 0.16), Colors.transparent],
-        ),
-      ),
-      child: SafeArea(
+    // The background wash is provided once by AppShell, not per-tab, so
+    // the color stays consistent across Inbox/Sent/Profile and while
+    // swiping between them.
+    return SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 24, 20, 100),
           child: Column(
@@ -148,8 +142,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ],
           ),
         ),
-      ),
-    );
+      );
   }
 }
 

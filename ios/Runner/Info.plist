@@ -26,6 +26,15 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Required for the compose screen's attachment picker (file_picker
+	     package): iOS shows these strings in the permission prompt the
+	     first time the app tries to reach the photo library or camera.
+	     Missing keys here cause an instant crash on iOS if that code path
+	     is ever hit, and can also fail App Store review. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SynapseMail needs access to your photos so you can attach images to a message.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SynapseMail needs access to your camera so you can take and attach a photo to a message.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

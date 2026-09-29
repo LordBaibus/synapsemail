@@ -68,6 +68,167 @@ function generateToken(): string {
     return bin2hex(random_bytes(32));
 }
 
+// ============================================================
+// Attachments
+// ============================================================
+
+/** Max total size of all attachments on one email, in bytes (30MB). */
+const MAX_ATTACHMENTS_BYTES = 30 * 1024 * 1024;
+
+/**
+ * Directory attachment files for a given email id are stored under.
+ * Created on demand.
+ */
+function attachmentsDir(int $emailId): string {
+    $dir = __DIR__ . '/../uploads/' . $emailId;
+    if (!is_dir($dir)) {
+        mkdir($dir, 0755, true);
+    }
+    return $dir;
+}
+
+/**
+ * Saves every uploaded file in $_FILES['attachments'] (a PHP multi-file
+ * upload field, as sent by a Flutter http.MultipartRequest with several
+ * files under the same field name) to disk under attachmentsDir($emailId)
+ * and inserts one `attachments` row per file. Returns the list of saved
+ * attachment rows, or throws a RuntimeException with a user-facing
+ * message if the combined size exceeds MAX_ATTACHMENTS_BYTES or a file
+ * fails to save.
+ *
+ * Safe to call with no files present (returns an empty array).
+ */
+function saveUploadedAttachments(mysqli $conn, int $emailId): array {
+    if (empty($_FILES['attachments']) || empty($_FILES['attachments']['name'][0])) {
+        return [];
+    }
+
+    $files = $_FILES['attachments'];
+    $count = count($files['name']);
+
+    $totalSize = 0;
+    for ($i = 0; $i < $count; $i++) {
+        if ($files['error'][$i] === UPLOAD_ERR_NO_FILE) continue;
+        $totalSize += (int) $files['size'][$i];
+    }
+    if ($totalSize > MAX_ATTACHMENTS_BYTES) {
+        $maxMb = (int) (MAX_ATTACHMENTS_BYTES / 1024 / 1024);
+        throw new RuntimeException("Attachments are too large (max {$maxMb}MB total)");
+    }
+
+    $dir = attachmentsDir($emailId);
+    $saved = [];
+
+    for ($i = 0; $i < $count; $i++) {
+        if ($files['error'][$i] === UPLOAD_ERR_NO_FILE) continue;
+        if ($files['error'][$i] !== UPLOAD_ERR_OK) {
+            throw new RuntimeException('One of the attachments failed to upload');
+        }
+
+        $originalName = basename($files['name'][$i]);
+        $ext = pathinfo($originalName, PATHINFO_EXTENSION);
+        $storedName = bin2hex(random_bytes(16)) . ($ext !== '' ? ".{$ext}" : '');
+        $destination = "{$dir}/{$storedName}";
+
+        if (!move_uploaded_file($files['tmp_name'][$i], $destination)) {
+            throw new RuntimeException("Failed to save attachment \"{$originalName}\"");
+        }
+
+        $mimeType = $files['type'][$i] ?: 'application/octet-stream';
+        $sizeBytes = (int) $files['size'][$i];
+
+        $stmt = $conn->prepare(
+            'INSERT INTO attachments (email_id, original_name, stored_name, mime_type, size_bytes) VALUES (?, ?, ?, ?, ?)'
+        );
+        $stmt->bind_param('isssi', $emailId, $originalName, $storedName, $mimeType, $sizeBytes);
+        $stmt->execute();
+
+        $saved[] = [
+            'id' => $stmt->insert_id,
+            'original_name' => $originalName,
+            'mime_type' => $mimeType,
+            'size_bytes' => $sizeBytes,
+        ];
+    }
+
+    return $saved;
+}
+
+/**
+ * Resolves the absolute on-disk path for every attachment on one email,
+ * for passing to PHPMailer's addAttachment(). Returns a list of
+ * ['path' => string, 'original_name' => string] pairs; any row whose file
+ * is missing on disk is silently skipped (best-effort delivery).
+ */
+function attachmentFilePaths(mysqli $conn, int $emailId): array {
+    $stmt = $conn->prepare(
+        'SELECT original_name, stored_name FROM attachments WHERE email_id = ? ORDER BY id ASC'
+    );
+    $stmt->bind_param('i', $emailId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    $dir = __DIR__ . '/../uploads/' . $emailId;
+    $paths = [];
+    while ($row = $result->fetch_assoc()) {
+        $path = "{$dir}/{$row['stored_name']}";
+        if (is_file($path)) {
+            $paths[] = ['path' => $path, 'original_name' => $row['original_name']];
+        }
+    }
+    return $paths;
+}
+
+/** Fetches the attachment rows for one email, for API responses. */
+function fetchAttachments(mysqli $conn, int $emailId): array {
+    $stmt = $conn->prepare(
+        'SELECT id, original_name, mime_type, size_bytes FROM attachments WHERE email_id = ? ORDER BY id ASC'
+    );
+    $stmt->bind_param('i', $emailId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    $rows = [];
+    while ($row = $result->fetch_assoc()) {
+        $row['id'] = (int) $row['id'];
+        $row['size_bytes'] = (int) $row['size_bytes'];
+        $rows[] = $row;
+    }
+    return $rows;
+}
+
+/** Deletes every file (and the containing directory) for one email's attachments. */
+function deleteAttachmentFiles(int $emailId): void {
+    $dir = __DIR__ . '/../uploads/' . $emailId;
+    if (!is_dir($dir)) return;
+    foreach (scandir($dir) as $file) {
+        if ($file === '.' || $file === '..') continue;
+        @unlink("{$dir}/{$file}");
+    }
+    @rmdir($dir);
+}
+
+/**
+ * Splits a comma/semicolon-separated address list (as typed by the user
+ * into a Cc/Bcc field, Gmail-style) into a clean array of valid, unique
+ * email addresses. Throws RuntimeException if any entry isn't a valid
+ * address.
+ */
+function parseAddressList(?string $raw): array {
+    if ($raw === null || trim($raw) === '') return [];
+    $parts = preg_split('/[,;]/', $raw) ?: [];
+    $addresses = [];
+    foreach ($parts as $part) {
+        $address = strtolower(trim($part));
+        if ($address === '') continue;
+        if (!filter_var($address, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException("\"{$address}\" is not a valid email address");
+        }
+        $addresses[$address] = true;
+    }
+    return array_keys($addresses);
+}
+
 /**
  * Generates a random 6-digit numeric OTP code (zero-padded, e.g. "004821").
  */
@@ -154,9 +315,24 @@ function sendOtpEmail(string $toEmail, string $fullName, string $otpCode, string
  * "send an email" in the app result in a real email arriving - the row
  * in the `emails` table is the in-app copy, this is the delivery.
  *
+ * $ccList / $bccList are arrays of already-validated email addresses
+ * (see parseAddressList). $attachments is an array of
+ * ['path' => string, 'original_name' => string] pairs - absolute
+ * filesystem paths to files already saved on disk (see
+ * saveUploadedAttachments), attached to the outgoing message as-is.
+ *
  * Returns true if the SMTP server accepted the message for delivery.
  */
-function sendMailNotification(string $toEmail, string $fromName, string $fromEmail, string $subject, string $bodyText): bool {
+function sendMailNotification(
+    string $toEmail,
+    string $fromName,
+    string $fromEmail,
+    string $subject,
+    string $bodyText,
+    array $ccList = [],
+    array $bccList = [],
+    array $attachments = []
+): bool {
     $GLOBALS['LAST_MAIL_ERROR'] = null;
     $safeFromName = htmlspecialchars($fromName, ENT_QUOTES, 'UTF-8');
     $safeSubject = htmlspecialchars($subject, ENT_QUOTES, 'UTF-8');
@@ -195,6 +371,16 @@ function sendMailNotification(string $toEmail, string $fromName, string $fromEma
         $mail->setFrom(SMTP_USERNAME, "{$fromName} (via SynapseMail)");
         $mail->addAddress($toEmail);
         $mail->addReplyTo($fromEmail, $fromName);
+
+        foreach ($ccList as $cc) {
+            $mail->addCC($cc);
+        }
+        foreach ($bccList as $bcc) {
+            $mail->addBCC($bcc);
+        }
+        foreach ($attachments as $attachment) {
+            $mail->addAttachment($attachment['path'], $attachment['original_name']);
+        }
 
         $mail->isHTML(true);
         $mail->Subject = $subject;

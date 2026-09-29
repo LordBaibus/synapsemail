@@ -4,6 +4,16 @@
  * in-app if they're also a user of this system) AND delivers it via real
  * SMTP, so it also reaches any real inbox. Optionally attaches to a thread
  * when `reply_to_id` is given.
+ *
+ * Unlike the other endpoints, this one is multipart/form-data (not JSON) -
+ * required so it can also carry attachment file uploads. Regular fields
+ * arrive in $_POST instead of a JSON body:
+ *   recipient_email, subject, body, reply_to_id (optional),
+ *   cc, bcc (optional, comma/semicolon-separated address lists),
+ *   scheduled_at (optional, "YYYY-MM-DD HH:MM:SS" - if set and in the
+ *     future, the email is stored but NOT delivered yet; the
+ *     send_scheduled.php cron script delivers it later)
+ * Files arrive as attachments[] (repeat the field name once per file).
  */
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/helpers.php';
@@ -17,11 +27,11 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $conn = getDbConnection();
 $user = requireAuth($conn);
 
-$body = getJsonBody();
-$recipient = trim(strtolower($body['recipient_email'] ?? ''));
-$subject = trim($body['subject'] ?? '(no subject)');
-$message = trim($body['body'] ?? '');
-$replyToId = isset($body['reply_to_id']) ? (int) $body['reply_to_id'] : 0;
+$recipient = trim(strtolower($_POST['recipient_email'] ?? ''));
+$subject = trim($_POST['subject'] ?? '(no subject)');
+$message = trim($_POST['body'] ?? '');
+$replyToId = isset($_POST['reply_to_id']) ? (int) $_POST['reply_to_id'] : 0;
+$scheduledAtRaw = trim($_POST['scheduled_at'] ?? '');
 
 if ($recipient === '' || $message === '') {
     respond(false, 'recipient_email and body are required', [], 400);
@@ -29,6 +39,25 @@ if ($recipient === '' || $message === '') {
 
 if (!filter_var($recipient, FILTER_VALIDATE_EMAIL)) {
     respond(false, 'Invalid recipient email address', [], 400);
+}
+
+try {
+    $ccList = parseAddressList($_POST['cc'] ?? null);
+    $bccList = parseAddressList($_POST['bcc'] ?? null);
+} catch (RuntimeException $e) {
+    respond(false, $e->getMessage(), [], 400);
+}
+
+// Scheduled send: must be a valid, future timestamp. Anything in the past
+// (or unparsable) is treated as "send now" rather than silently failing.
+$scheduledAt = null;
+$status = 'sent';
+if ($scheduledAtRaw !== '') {
+    $parsed = DateTime::createFromFormat('Y-m-d H:i:s', $scheduledAtRaw);
+    if ($parsed !== false && $parsed->getTimestamp() > time()) {
+        $scheduledAt = $parsed->format('Y-m-d H:i:s');
+        $status = 'scheduled';
+    }
 }
 
 // If this is a reply, resolve the thread it belongs to (the original
@@ -58,12 +87,19 @@ if ($replyToId > 0) {
 }
 
 $replyToIdOrNull = $replyToId > 0 ? $replyToId : null;
+$ccStored = !empty($ccList) ? implode(', ', $ccList) : null;
+$bccStored = !empty($bccList) ? implode(', ', $bccList) : null;
 
 // 1. Store in our own database so the in-app inbox shows it (CRUD "Create").
 $stmt = $conn->prepare(
-    'INSERT INTO emails (sender_email, recipient_email, subject, body, thread_id, reply_to_id) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO emails (sender_email, recipient_email, cc, bcc, subject, body, thread_id, reply_to_id, scheduled_at, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
-$stmt->bind_param('ssssii', $user['email'], $recipient, $subject, $message, $threadId, $replyToIdOrNull);
+$stmt->bind_param(
+    'ssssssiiss',
+    $user['email'], $recipient, $ccStored, $bccStored, $subject, $message,
+    $threadId, $replyToIdOrNull, $scheduledAt, $status
+);
 
 if (!$stmt->execute()) {
     respond(false, 'Failed to save the email', [], 500);
@@ -79,12 +115,52 @@ if ($threadId === null) {
     $update->execute();
 }
 
-// 2. Actually deliver it via SMTP, so it also reaches real inboxes
-//    (e.g. Gmail, Outlook) outside this app.
-$mailSent = sendMailNotification($recipient, $user['full_name'], $user['email'], $subject, $message);
+// 2. Save any attached files to disk (regardless of whether this is a
+//    scheduled send - they need to exist already so the cron script can
+//    attach them later).
+try {
+    $savedAttachments = saveUploadedAttachments($conn, $emailId);
+} catch (RuntimeException $e) {
+    // Roll back the email row rather than leaving a half-sent message with
+    // no attachments the user thought they attached.
+    $del = $conn->prepare('DELETE FROM emails WHERE id = ?');
+    $del->bind_param('i', $emailId);
+    $del->execute();
+    deleteAttachmentFiles($emailId);
+    respond(false, $e->getMessage(), [], 400);
+}
+
+// 3. If this is a scheduled send, stop here - send_scheduled.php delivers
+//    it later. Otherwise deliver immediately via SMTP right now.
+if ($status === 'scheduled') {
+    respond(true, 'Email scheduled', [
+        'id' => $emailId,
+        'status' => 'scheduled',
+        'scheduled_at' => $scheduledAt,
+        'attachments' => $savedAttachments,
+    ]);
+}
+
+$attachmentPaths = attachmentFilePaths($conn, $emailId);
+
+$mailSent = sendMailNotification(
+    $recipient,
+    $user['full_name'],
+    $user['email'],
+    $subject,
+    $message,
+    $ccList,
+    $bccList,
+    $attachmentPaths
+);
+
+if (!$mailSent) {
+    $conn->query('UPDATE emails SET status = \'failed\' WHERE id = ' . (int) $emailId);
+}
 
 respond(true, $mailSent ? 'Email sent' : 'Email saved, but delivery to the recipient\'s inbox failed', [
     'id' => $emailId,
     'mail_delivered' => $mailSent,
     'mail_error' => $mailSent ? null : lastMailError(),
+    'attachments' => $savedAttachments,
 ]);

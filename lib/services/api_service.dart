@@ -4,6 +4,23 @@ import '../models/app_user.dart';
 import '../models/email_message.dart';
 import 'session_store.dart';
 
+/// One file staged for sending, picked on-device via file_picker.
+/// [bytes] is used on every platform (works for web too, where a
+/// filesystem path isn't available); [path] is kept only for reference/UI.
+class PendingAttachment {
+  final String fileName;
+  final List<int> bytes;
+  final String? mimeType;
+
+  const PendingAttachment({
+    required this.fileName,
+    required this.bytes,
+    this.mimeType,
+  });
+
+  int get sizeBytes => bytes.length;
+}
+
 class ApiException implements Exception {
   final String message;
   ApiException(this.message);
@@ -230,28 +247,94 @@ class ApiService {
         .toList();
   }
 
+  /// Total attachment size cap enforced client-side too, so a too-large
+  /// selection is rejected before spending time on an upload the server
+  /// will reject anyway (see MAX_ATTACHMENTS_BYTES in backend/config/helpers.php).
+  static const maxAttachmentsBytes = 30 * 1024 * 1024;
+
   /// Sends a new message, or a reply when [replyToId] is set (the backend
-  /// then attaches it to that message's thread). Returns the new
-  /// message's id.
+  /// then attaches it to that message's thread). [cc]/[bcc] are lists of
+  /// email addresses. [attachments] are files picked on-device. When
+  /// [scheduledAt] is set (and in the future), the backend stores the
+  /// message without delivering it yet - a cron job on the server sends it
+  /// once that time arrives. Returns the new message's id.
+  ///
+  /// Always a multipart/form-data request (rather than JSON like the rest
+  /// of this API) since it may carry file uploads.
   Future<int> sendEmail({
     required String recipientEmail,
     required String subject,
     required String body,
     int? replyToId,
+    List<String> cc = const [],
+    List<String> bcc = const [],
+    List<PendingAttachment> attachments = const [],
+    DateTime? scheduledAt,
   }) async {
-    final response = await http.post(
-      _uri('send.php'),
-      headers: await _headers(auth: true),
-      body: jsonEncode({
-        'recipient_email': recipientEmail,
-        'subject': subject,
-        'body': body,
-        if (replyToId != null) 'reply_to_id': replyToId,
-      }),
-    );
+    final totalBytes = attachments.fold<int>(0, (sum, a) => sum + a.sizeBytes);
+    if (totalBytes > maxAttachmentsBytes) {
+      throw ApiException('Attachments are too large (max 30MB total)');
+    }
+
+    final request = http.MultipartRequest('POST', _uri('send.php'));
+    final token = await _sessionStore.getToken();
+    if (token != null) {
+      request.headers['Authorization'] = 'Bearer $token';
+    }
+
+    request.fields['recipient_email'] = recipientEmail;
+    request.fields['subject'] = subject;
+    request.fields['body'] = body;
+    if (replyToId != null) request.fields['reply_to_id'] = '$replyToId';
+    if (cc.isNotEmpty) request.fields['cc'] = cc.join(', ');
+    if (bcc.isNotEmpty) request.fields['bcc'] = bcc.join(', ');
+    if (scheduledAt != null) {
+      request.fields['scheduled_at'] = _formatScheduledAt(scheduledAt);
+    }
+
+    for (final attachment in attachments) {
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'attachments[]',
+          attachment.bytes,
+          filename: attachment.fileName,
+        ),
+      );
+    }
+
+    final streamedResponse = await request.send();
+    final response = await http.Response.fromStream(streamedResponse);
     final data = _decode(response);
     return data['id'] as int;
   }
+
+  /// Formats a [DateTime] (as picked on-device, in the phone's local
+  /// timezone) as the "YYYY-MM-DD HH:MM:SS" string send.php expects for
+  /// scheduled_at.
+  ///
+  /// The Hostinger server runs on UTC (confirmed via `date` on the box),
+  /// and send.php compares this string against the server's own `NOW()`/
+  /// `time()`, both UTC. A phone set to Philippine time (UTC+8) picking
+  /// "3:45 PM" means 3:45 PM PH time, i.e. 07:45 UTC - so this must
+  /// convert to UTC before formatting, or a schedule set for "5 minutes
+  /// from now" would actually fire 8 hours+5 minutes from now instead.
+  String _formatScheduledAt(DateTime dt) {
+    final utc = dt.toUtc();
+    String pad(int n) => n.toString().padLeft(2, '0');
+    return '${utc.year}-${pad(utc.month)}-${pad(utc.day)} ${pad(utc.hour)}:${pad(utc.minute)}:${pad(utc.second)}';
+  }
+
+  /// URL to fetch one attachment's raw bytes (for previewing an image or
+  /// downloading a file) - the caller must add the Authorization header
+  /// itself (see [attachmentHeaders]) since this is used directly in
+  /// things like Image.network.
+  Uri attachmentUri(int attachmentId) =>
+      _uri('attachment.php', {'id': '$attachmentId'});
+
+  /// Auth header map for attachment requests (e.g. Image.network, which
+  /// can't await inside its build method) - call this once (e.g. in
+  /// initState) and cache the result.
+  Future<Map<String, String>> attachmentHeaders() => _headers(auth: true);
 
   Future<void> deleteEmail(int id) async {
     final response = await http.post(

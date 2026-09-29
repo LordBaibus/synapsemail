@@ -32,6 +32,21 @@ dependencies:
   # Relative timestamps ("2m ago", "Yesterday") for the inbox list.
   intl: ^0.19.0
 
+  # Native file/photo picker for compose-screen attachments (gallery,
+  # camera roll, and general file browsing, like Gmail's attach button).
+  #
+  # Pinned to the 10.3.x line specifically: 8.1.4 (our original pin)
+  # resolved to 8.3.7, whose Android build fails against Flutter's current
+  # SDK because the transitive flutter_plugin_android_lifecycle dependency
+  # requires compileSdk 36+ while file_picker 8.3.7's own Android module
+  # was still built against 34 (Gradle error: ":file_picker:checkDebugAarMetadata").
+  # 10.3.3 is the first release that fixed this ("Updated compileSdk to use
+  # flutter.compileSdkVersion" per the changelog). 11.0.0 is excluded because
+  # it's a breaking change - FilePicker.platform is removed in favor of
+  # static FilePicker.pickFiles() calls, which our compose_screen.dart code
+  # does not use.
+  file_picker: ">=10.3.3 <11.0.0"
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

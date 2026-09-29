@@ -21,7 +21,7 @@ if ($id <= 0) {
 }
 
 $stmt = $conn->prepare(
-    'SELECT id, sender_email, recipient_email, subject, body, is_read, thread_id, reply_to_id, created_at
+    'SELECT id, sender_email, recipient_email, cc, bcc, subject, body, is_read, thread_id, reply_to_id, scheduled_at, status, created_at
      FROM emails
      WHERE id = ? AND (sender_email = ? OR recipient_email = ?)
      LIMIT 1'
@@ -48,6 +48,7 @@ $email['id'] = (int) $email['id'];
 $email['is_read'] = (bool) $email['is_read'];
 $email['thread_id'] = $email['thread_id'] !== null ? (int) $email['thread_id'] : null;
 $email['reply_to_id'] = $email['reply_to_id'] !== null ? (int) $email['reply_to_id'] : null;
+$email['attachments'] = fetchAttachments($conn, $email['id']);
 
 // If this message is a reply, include a compact snapshot of the message it
 // replied to, so the client can show it inline (Messenger-style) without a

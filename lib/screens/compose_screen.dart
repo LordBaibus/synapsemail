@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
@@ -27,11 +28,30 @@ class _ComposeScreenState extends State<ComposeScreen> {
     text: widget.replyTo != null ? _replySubject(widget.replyTo!.subject) : '',
   );
   final _bodyController = TextEditingController();
+  final _ccController = TextEditingController();
+  final _bccController = TextEditingController();
 
   bool _isSending = false;
   String? _errorMessage;
 
+  // Cc/Bcc fields start collapsed behind a toggle link, Gmail-style, so
+  // they don't clutter the form for the common case of a single recipient.
+  bool _showCcBcc = false;
+
+  // Files picked on-device, staged for upload on send. Each carries its
+  // bytes in memory (works across platforms, including web).
+  final List<PendingAttachment> _attachments = [];
+  bool _isPickingFiles = false;
+
   bool get _isReply => widget.replyTo != null;
+
+  int get _attachmentsTotalBytes =>
+      _attachments.fold<int>(0, (sum, a) => sum + a.sizeBytes);
+
+  String get _attachmentsTotalLabel {
+    final mb = _attachmentsTotalBytes / (1024 * 1024);
+    return '${mb.toStringAsFixed(1)} MB';
+  }
 
   static const _accent = Color(0xFF6C5CE7);
   static const _accentBright = Color(0xFF00E5FF);
@@ -57,8 +77,18 @@ class _ComposeScreenState extends State<ComposeScreen> {
     _toController.dispose();
     _subjectController.dispose();
     _bodyController.dispose();
+    _ccController.dispose();
+    _bccController.dispose();
     super.dispose();
   }
+
+  /// Splits a comma/semicolon-separated "a@x.com, b@y.com" field into a
+  /// clean list of addresses, same convention as the backend's own parser.
+  List<String> _splitAddresses(String raw) => raw
+      .split(RegExp(r'[,;]'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
 
   Future<void> _send() async {
     final recipient = _toController.text.trim();
@@ -80,6 +110,9 @@ class _ComposeScreenState extends State<ComposeScreen> {
         subject: _subjectController.text.trim(),
         body: body,
         replyToId: widget.replyTo?.id,
+        cc: _splitAddresses(_ccController.text),
+        bcc: _splitAddresses(_bccController.text),
+        attachments: _attachments,
       );
       if (!mounted) return;
       Navigator.of(context).pop(true);
@@ -90,6 +123,57 @@ class _ComposeScreenState extends State<ComposeScreen> {
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
+  }
+
+  /// Runs one of file_picker's pick modes, reads the picked files' bytes
+  /// into memory, and appends them to the staged attachment list - up to
+  /// the 30MB combined cap (matching the server's own limit).
+  ///
+  /// [type] chooses which native picker opens: [FileType.media] opens the
+  /// system Photos grid (PHPickerViewController on iOS, the Photos app
+  /// picker on Android) for images/videos, the same picker Gmail's
+  /// "insert photo" option uses - while [FileType.any] opens the general
+  /// Files browser, for anything else (PDFs, docs, etc.), matching
+  /// Gmail's separate "attach file" option.
+  Future<void> _pickAttachments(FileType type) async {
+    setState(() => _isPickingFiles = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: type,
+        withData: true,
+      );
+      if (result == null) return;
+
+      final picked = <PendingAttachment>[];
+      for (final file in result.files) {
+        final bytes = file.bytes;
+        if (bytes == null) continue; // shouldn't happen with withData: true
+        picked.add(PendingAttachment(
+          fileName: file.name,
+          bytes: bytes,
+          mimeType: null,
+        ));
+      }
+
+      final newTotal = _attachmentsTotalBytes +
+          picked.fold<int>(0, (sum, a) => sum + a.sizeBytes);
+      if (newTotal > ApiService.maxAttachmentsBytes) {
+        setState(() => _errorMessage = 'Attachments are too large (max 30MB total)');
+        return;
+      }
+
+      setState(() {
+        _attachments.addAll(picked);
+        _errorMessage = null;
+      });
+    } finally {
+      if (mounted) setState(() => _isPickingFiles = false);
+    }
+  }
+
+  void _removeAttachment(PendingAttachment attachment) {
+    setState(() => _attachments.remove(attachment));
   }
 
   @override
@@ -158,11 +242,44 @@ class _ComposeScreenState extends State<ComposeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       if (!_isReply) ...[
-                        GlassTextField(
-                          placeholder: 'To',
-                          controller: _toController,
-                          prefixIcon: const Icon(CupertinoIcons.at, size: 18, color: Colors.white54),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: GlassTextField(
+                                placeholder: 'To',
+                                controller: _toController,
+                                prefixIcon: const Icon(CupertinoIcons.at, size: 18, color: Colors.white54),
+                              ),
+                            ),
+                            if (!_showCcBcc) ...[
+                              const SizedBox(width: 8),
+                              GestureDetector(
+                                onTap: () => setState(() => _showCcBcc = true),
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                                  child: Text(
+                                    'Cc/Bcc',
+                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _accentBright),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
+                        if (_showCcBcc) ...[
+                          const SizedBox(height: 12),
+                          GlassTextField(
+                            placeholder: 'Cc',
+                            controller: _ccController,
+                            prefixIcon: const Icon(CupertinoIcons.person_2, size: 18, color: Colors.white54),
+                          ),
+                          const SizedBox(height: 12),
+                          GlassTextField(
+                            placeholder: 'Bcc',
+                            controller: _bccController,
+                            prefixIcon: const Icon(CupertinoIcons.eye_slash, size: 18, color: Colors.white54),
+                          ),
+                        ],
                         const SizedBox(height: 12),
                       ],
                       GlassTextField(
@@ -172,6 +289,38 @@ class _ComposeScreenState extends State<ComposeScreen> {
                       ),
                       const SizedBox(height: 12),
                       GlassTextArea(placeholder: 'Compose your message', controller: _bodyController),
+                      if (_attachments.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        _AttachmentChips(
+                          attachments: _attachments,
+                          accentBright: _accentBright,
+                          onRemove: _removeAttachment,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '$_attachmentsTotalLabel of 30 MB',
+                          style: const TextStyle(fontSize: 11, color: Colors.white38),
+                        ),
+                      ],
+                      const SizedBox(height: 14),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          _ComposeToolButton(
+                            icon: CupertinoIcons.photo,
+                            label: 'Photos',
+                            isLoading: _isPickingFiles,
+                            onTap: _isPickingFiles ? null : () => _pickAttachments(FileType.media),
+                          ),
+                          _ComposeToolButton(
+                            icon: CupertinoIcons.paperclip,
+                            label: 'Files',
+                            isLoading: _isPickingFiles,
+                            onTap: _isPickingFiles ? null : () => _pickAttachments(FileType.any),
+                          ),
+                        ],
+                      ),
                       if (_errorMessage != null) ...[
                         const SizedBox(height: 12),
                         Row(
@@ -198,7 +347,9 @@ class _ComposeScreenState extends State<ComposeScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              _isSending ? 'SENDING…' : (_isReply ? 'SEND REPLY' : 'SEND'),
+                              _isSending
+                                  ? 'SENDING…'
+                                  : (_isReply ? 'SEND REPLY' : 'SEND'),
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w700,
@@ -219,6 +370,126 @@ class _ComposeScreenState extends State<ComposeScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Small pill button used for the attach actions below the compose body,
+/// Gmail-toolbar-style.
+class _ComposeToolButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final bool isLoading;
+  const _ComposeToolButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.isLoading = false,
+  });
+
+  static const _accentBright = Color(0xFF00E5FF);
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isLoading)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2, color: _accentBright),
+              )
+            else
+              Icon(icon, size: 15, color: _accentBright),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Horizontally-wrapped chips for each staged attachment, with a remove
+/// button - shown above the attach-tools row once files are picked.
+class _AttachmentChips extends StatelessWidget {
+  final List<PendingAttachment> attachments;
+  final Color accentBright;
+  final ValueChanged<PendingAttachment> onRemove;
+  const _AttachmentChips({
+    required this.attachments,
+    required this.accentBright,
+    required this.onRemove,
+  });
+
+  IconData _iconFor(String fileName) {
+    final ext = fileName.split('.').last.toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic'].contains(ext)) {
+      return CupertinoIcons.photo;
+    }
+    if (ext == 'pdf') return CupertinoIcons.doc_richtext;
+    return CupertinoIcons.doc;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: attachments.map((a) {
+        final sizeMb = a.sizeBytes / (1024 * 1024);
+        final sizeLabel = sizeMb >= 1
+            ? '${sizeMb.toStringAsFixed(1)} MB'
+            : '${(a.sizeBytes / 1024).toStringAsFixed(0)} KB';
+        return Container(
+          padding: const EdgeInsets.only(left: 10, right: 6, top: 6, bottom: 6),
+          decoration: BoxDecoration(
+            color: accentBright.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: accentBright.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_iconFor(a.fileName), size: 14, color: accentBright),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 120),
+                child: Text(
+                  a.fileName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                sizeLabel,
+                style: const TextStyle(fontSize: 10.5, color: Colors.white54),
+              ),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onTap: () => onRemove(a),
+                child: const Icon(CupertinoIcons.xmark_circle_fill, size: 16, color: Colors.white38),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
     );
   }
 }

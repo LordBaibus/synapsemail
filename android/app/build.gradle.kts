@@ -6,7 +6,12 @@ plugins {
 
 android {
     namespace = "com.example.email_app"
-    compileSdk = flutter.compileSdkVersion
+    // Overridden to 36 (rather than the Flutter-SDK-provided default, which
+    // still points at 34 on the currently installed Flutter version): the
+    // file_picker plugin pulls in flutter_plugin_android_lifecycle, which
+    // requires compiling against API 36+. Without this override the build
+    // fails at Gradle's ":file_picker:checkDebugAarMetadata" task.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -20,7 +25,9 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        // Matches compileSdk above, per Android's recommendation to keep
+        // targetSdk aligned with compileSdk.
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

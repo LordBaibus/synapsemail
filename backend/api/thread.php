@@ -48,27 +48,54 @@ $threadId = $anchor['thread_id'] !== null ? (int) $anchor['thread_id'] : (int) $
 // rows never got a thread_id backfilled, matching the root's own id) that
 // this user was a participant in.
 $stmt = $conn->prepare(
-    'SELECT id, sender_email, recipient_email, subject, body, is_read, thread_id, reply_to_id, created_at
+    "SELECT id, sender_email, recipient_email, cc, bcc, subject, body, is_read, thread_id, reply_to_id, scheduled_at, status, created_at
      FROM emails
      WHERE (thread_id = ? OR id = ?) AND (sender_email = ? OR recipient_email = ?)
-     ORDER BY created_at ASC, id ASC'
+       AND NOT (status = 'scheduled' AND recipient_email = ?)
+     ORDER BY created_at ASC, id ASC"
 );
-$stmt->bind_param('iiss', $threadId, $threadId, $user['email'], $user['email']);
+$stmt->bind_param('iisss', $threadId, $threadId, $user['email'], $user['email'], $user['email']);
 $stmt->execute();
 $result = $stmt->get_result();
 
 $messages = [];
 $unreadIds = [];
+$ids = [];
 while ($row = $result->fetch_assoc()) {
     $row['id'] = (int) $row['id'];
     $row['is_read'] = (bool) $row['is_read'];
     $row['thread_id'] = $row['thread_id'] !== null ? (int) $row['thread_id'] : null;
     $row['reply_to_id'] = $row['reply_to_id'] !== null ? (int) $row['reply_to_id'] : null;
     $messages[] = $row;
+    $ids[] = $row['id'];
 
     if ($row['recipient_email'] === $user['email'] && !$row['is_read']) {
         $unreadIds[] = $row['id'];
     }
+}
+
+// Attach each message's attachment list in one extra query.
+if (!empty($ids)) {
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $types = str_repeat('i', count($ids));
+    $attStmt = $conn->prepare(
+        "SELECT id, email_id, original_name, mime_type, size_bytes FROM attachments WHERE email_id IN ($placeholders) ORDER BY id ASC"
+    );
+    $attStmt->bind_param($types, ...$ids);
+    $attStmt->execute();
+    $attResult = $attStmt->get_result();
+    $byEmailId = [];
+    while ($att = $attResult->fetch_assoc()) {
+        $att['id'] = (int) $att['id'];
+        $att['size_bytes'] = (int) $att['size_bytes'];
+        $emailId = (int) $att['email_id'];
+        unset($att['email_id']);
+        $byEmailId[$emailId][] = $att;
+    }
+    foreach ($messages as &$m) {
+        $m['attachments'] = $byEmailId[$m['id']] ?? [];
+    }
+    unset($m);
 }
 
 // Mark every unread message the user received in this thread as read,

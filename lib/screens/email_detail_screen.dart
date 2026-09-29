@@ -178,11 +178,38 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
     setState(() => _replyTarget = _messages.isNotEmpty ? _latest : null);
   }
 
-  void _onBubbleAction(EmailMessage message, MessageAction action) {
+  Future<bool> _confirmDelete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1B2E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text('Delete message?', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'This message will be permanently deleted.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Color(0xFFFF6961), fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
+  Future<void> _onBubbleAction(EmailMessage message, MessageAction action) async {
     if (action == MessageAction.reply) {
       _prefillReplyTo(message);
     } else if (action == MessageAction.delete) {
-      _deleteMessage(message);
+      final confirmed = await _confirmDelete();
+      if (confirmed) _deleteMessage(message);
     }
   }
 
@@ -426,6 +453,11 @@ class _MessageBubble extends StatelessWidget {
               shape: LiquidRoundedSuperellipse(
                 borderRadius: 18,
               ),
+              // GlassPanel defaults to 24px of its own padding around the
+              // child - that gap was showing as empty glass around the
+              // colored fill below. Zero it out; the real content padding
+              // is the Padding(14, 10) inside the DecoratedBox already.
+              padding: EdgeInsets.zero,
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(18),

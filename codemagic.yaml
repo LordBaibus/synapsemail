@@ -1,4 +1,4 @@
-workflows:
+  workflows:
   ios-workflow:
     name: Email App - iOS Build (unsigned, sideload via AltStore)
     max_build_duration: 60
@@ -34,13 +34,9 @@ workflows:
       - build/ios/iphoneos/EmailApp-unsigned.ipa
 
     publishing:
-      # No signing, no App Store Connect, no certificates required here.
-      # Download the .ipa artifact from this build in Codemagic and install
-      # it on your iPhone through AltServer/AltStore - AltStore does all
-      # the signing itself using your free Apple ID.
       email:
         recipients:
-          - thesiscpe837@gmail.com
+          - jairusmaniago0204@gmail.com
         notify:
           success: true
           failure: true
@@ -50,6 +46,7 @@ workflows:
     max_build_duration: 30
     environment:
       flutter: stable
+      java: 21
     triggering:
       events:
         - push
@@ -59,6 +56,17 @@ workflows:
     scripts:
       - name: Install Flutter dependencies
         script: flutter pub get
+      # file_picker's transitive flutter_plugin_android_lifecycle dependency
+      # requires compileSdk 36+ (see android/app/build.gradle.kts, which
+      # pins compileSdk/targetSdk to 36 explicitly rather than relying on
+      # Flutter's own bundled default, which can lag behind). Codemagic's
+      # build image needs the matching platform installed - this no-ops if
+      # it's already present, and downloads it otherwise, so CI doesn't hit
+      # the same ":file_picker:checkDebugAarMetadata" failure this was
+      # debugged against locally.
+      - name: Ensure Android SDK Platform 36 is installed
+        script: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-36" || true
       - name: Build APK
         script: flutter build apk --release
     artifacts:

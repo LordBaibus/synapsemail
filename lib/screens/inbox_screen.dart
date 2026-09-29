@@ -101,6 +101,34 @@ class InboxScreenState extends State<InboxScreen> {
     }
   }
 
+  /// Asks the user to confirm before a message is actually removed, since
+  /// deleting is destructive and easy to trigger by accident with a swipe.
+  Future<bool> _confirmDelete(EmailMessage email) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1B2E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: const Text('Delete message?', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'This message will be permanently deleted.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Color(0xFFFF6961), fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
   Future<void> openCompose() async {
     final sent = await Navigator.of(context).push<bool>(
       MaterialPageRoute(builder: (_) => const ComposeScreen()),
@@ -130,11 +158,12 @@ class InboxScreenState extends State<InboxScreen> {
   /// app is sideloaded to iOS where long-press is the expected gesture
   /// for message actions. Opens as a [GlassMenu] right at the row instead
   /// of a bottom sheet.
-  void _onRowAction(EmailMessage email, MessageAction action) {
+  Future<void> _onRowAction(EmailMessage email, MessageAction action) async {
     if (action == MessageAction.reply) {
       _openReply(email);
     } else if (action == MessageAction.delete) {
-      _deleteEmail(email);
+      final confirmed = await _confirmDelete(email);
+      if (confirmed) _deleteEmail(email);
     }
   }
 
@@ -158,27 +187,18 @@ class InboxScreenState extends State<InboxScreen> {
       return _buildError();
     }
 
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: RadialGradient(
-          center: const Alignment(0, -0.8),
-          radius: 1.6,
-          colors: [
-            (widget.folder == 'inbox' ? _accent : _accentBright).withValues(alpha: 0.10),
-            Colors.transparent,
-          ],
-        ),
+    // The background wash is provided once by AppShell, not per-tab, so
+    // the color stays consistent across Inbox/Sent/Profile and while
+    // swiping between them.
+    return Skeletonizer(
+      enabled: _isLoading,
+      effect: ShimmerEffect(
+        baseColor: Colors.white.withValues(alpha: 0.14),
+        highlightColor: Colors.white.withValues(alpha: 0.24),
       ),
-      child: Skeletonizer(
-        enabled: _isLoading,
-        effect: ShimmerEffect(
-          baseColor: Colors.white.withValues(alpha: 0.14),
-          highlightColor: Colors.white.withValues(alpha: 0.24),
-        ),
-        child: RefreshIndicator(
-          onRefresh: _loadEmails,
-          child: _buildList(_isLoading ? _placeholderEmails : _emails),
-        ),
+      child: RefreshIndicator(
+        onRefresh: _loadEmails,
+        child: _buildList(_isLoading ? _placeholderEmails : _emails),
       ),
     );
   }
@@ -244,8 +264,23 @@ class InboxScreenState extends State<InboxScreen> {
 
     return Dismissible(
       key: ValueKey(email.id),
-      direction: DismissDirection.endToStart,
+      direction: DismissDirection.horizontal,
+      // Swipe right (drag start-to-end, i.e. left edge moves right): reply.
+      // Flutter shows `background` behind this direction - icon sits on
+      // the far left so it's visible after just a little swipe.
       background: Container(
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 24),
+        decoration: BoxDecoration(
+          color: _accentBright.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: const Icon(CupertinoIcons.arrowshape_turn_up_left_fill, color: _accentBright),
+      ),
+      // Swipe left (drag end-to-start, i.e. right edge moves left): delete.
+      // Flutter shows `secondaryBackground` behind this direction - icon
+      // sits on the far right.
+      secondaryBackground: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 24),
         decoration: BoxDecoration(
@@ -254,6 +289,14 @@ class InboxScreenState extends State<InboxScreen> {
         ),
         child: const Icon(CupertinoIcons.delete, color: Color(0xFFFF3B30)),
       ),
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          // Reply swipe: never actually removes the row from the list.
+          _openReply(email);
+          return false;
+        }
+        return _confirmDelete(email);
+      },
       onDismissed: (_) => _deleteEmail(email),
       child: MessageActionMenu(
         onSelected: (action) => _onRowAction(email, action),
@@ -264,14 +307,17 @@ class InboxScreenState extends State<InboxScreen> {
           useOwnLayer: true,
           settings: _rowSettings,
           shape: const LiquidRoundedSuperellipse(borderRadius: 18),
-          padding: const EdgeInsets.all(14),
+          // Padding moved off GlassContainer (which insets the fill below
+          // away from the glass edge) and onto the inner Padding instead,
+          // so the accent tint fills the whole tile edge-to-edge.
+          padding: EdgeInsets.zero,
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(18),
               color: unread ? _accent.withValues(alpha: 0.10) : Colors.transparent,
             ),
             child: Padding(
-              padding: const EdgeInsets.all(2),
+              padding: const EdgeInsets.all(14),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [

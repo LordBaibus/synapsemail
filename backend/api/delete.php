@@ -51,4 +51,11 @@ $stmt = $conn->prepare(
 $stmt->bind_param('i', $id);
 $stmt->execute();
 
+// The `attachments` rows are removed automatically (FOREIGN KEY ... ON
+// DELETE CASCADE), but the files themselves on disk are not - clean those
+// up too whenever the row above actually got deleted.
+if ($stmt->affected_rows > 0) {
+    deleteAttachmentFiles($id);
+}
+
 respond(true, 'Email deleted');
