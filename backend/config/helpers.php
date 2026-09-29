@@ -128,6 +128,37 @@ function attachmentsDir(int $emailId): string {
 }
 
 /**
+ * Determines a file's real MIME type by inspecting its actual bytes
+ * (PHP's fileinfo extension), rather than trusting a client-supplied
+ * Content-Type.
+ *
+ * This matters because the Flutter app's http package
+ * (http.MultipartFile.fromBytes, used in ApiService.sendEmail) doesn't set
+ * an explicit contentType on the uploaded file part, so it silently
+ * defaults to "application/octet-stream" for every single attachment -
+ * photos included. Trusting that client-reported value here meant every
+ * photo ever sent was being stored with mime_type = "application/
+ * octet-stream", which made EmailAttachment.isImage (mimeType.startsWith
+ * ('image/')) always false on the Flutter side - so photos were always
+ * rendered as a generic file chip instead of an image thumbnail, and
+ * tapping one hit the exact same "open externally, unauthenticated" issue
+ * that plain file attachments had.
+ */
+function detectMimeType(string $filePath, string $clientReportedType = ''): string {
+    if (is_file($filePath) && function_exists('finfo_open')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo !== false) {
+            $detected = finfo_file($finfo, $filePath);
+            finfo_close($finfo);
+            if (is_string($detected) && $detected !== '') {
+                return $detected;
+            }
+        }
+    }
+    return $clientReportedType !== '' ? $clientReportedType : 'application/octet-stream';
+}
+
+/**
  * Saves every uploaded file in $_FILES['attachments'] (a PHP multi-file
  * upload field, as sent by a Flutter http.MultipartRequest with several
  * files under the same field name) to disk under attachmentsDir($emailId)
@@ -174,7 +205,9 @@ function saveUploadedAttachments(mysqli $conn, int $emailId): array {
             throw new RuntimeException("Failed to save attachment \"{$originalName}\"");
         }
 
-        $mimeType = $files['type'][$i] ?: 'application/octet-stream';
+        // Detected from the file's actual bytes, not the client-reported
+        // type - see detectMimeType()'s docblock for why that matters.
+        $mimeType = detectMimeType($destination, $files['type'][$i] ?? '');
         $sizeBytes = (int) $files['size'][$i];
 
         $stmt = $conn->prepare(
