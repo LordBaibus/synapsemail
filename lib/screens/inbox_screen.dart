@@ -258,8 +258,13 @@ class InboxScreenState extends State<InboxScreen> {
   }
 
   Widget _buildEmailRow(EmailMessage email) {
-    final counterpart =
-        widget.folder == 'inbox' ? email.senderEmail : email.recipientEmail;
+    // For the Sent folder, show every "To"/Cc recipient, not just the first
+    // one - extra "To" addresses beyond the first ride along as Cc under
+    // the hood (see compose_screen.dart's _send()), so recipientEmail alone
+    // was silently dropping anyone else the message went to.
+    final counterpart = widget.folder == 'inbox'
+        ? email.senderEmail
+        : [email.recipientEmail, ...email.cc].join(', ');
     final unread = !email.isRead;
 
     return Dismissible(

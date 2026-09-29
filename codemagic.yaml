@@ -16,6 +16,13 @@ workflows:
       - name: Install Flutter dependencies
         script: flutter pub get
 
+      # Regenerates ios/Runner/Assets.xcassets launcher icons from
+      # assets/icon/app_icon.png per the flutter_launcher_icons config in
+      # pubspec.yaml - keeps CI builds in sync with local ones without
+      # committing every generated platform icon file to the repo.
+      - name: Generate launcher icons
+        script: dart run flutter_launcher_icons
+
       - name: Flutter analyze (fail fast on obvious errors)
         script: flutter analyze --no-fatal-infos || true
 
@@ -56,6 +63,11 @@ workflows:
     scripts:
       - name: Install Flutter dependencies
         script: flutter pub get
+      # Regenerates android/app/src/main/res launcher icons (including the
+      # adaptive-icon foreground/background) from assets/icon/ per the
+      # flutter_launcher_icons config in pubspec.yaml.
+      - name: Generate launcher icons
+        script: dart run flutter_launcher_icons
       # file_picker's transitive flutter_plugin_android_lifecycle dependency
       # requires compileSdk 36+ (see android/app/build.gradle.kts, which
       # pins compileSdk/targetSdk to 36 explicitly rather than relying on

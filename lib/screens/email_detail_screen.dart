@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:skeletonizer/skeletonizer.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../main.dart';
 import '../models/email_message.dart';
 import '../services/api_service.dart';
@@ -225,7 +226,7 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
         ),
         title: _messages.isNotEmpty
             ? Text(
-                _counterpartFor(_latest),
+                _counterpartLabelFor(_latest),
                 style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700),
                 overflow: TextOverflow.ellipsis,
               )
@@ -252,8 +253,26 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
     );
   }
 
-  String _counterpartFor(EmailMessage message) {
-    return message.senderEmail == _myEmail ? message.recipientEmail : message.senderEmail;
+  /// The other people on this message - everyone besides the signed-in
+  /// user. When the message was sent BY the user, that's the recipient plus
+  /// anyone on Cc (extra "To" addresses ride along as Cc under the hood,
+  /// since recipient_email is a single column - see compose_screen.dart's
+  /// _send()), so all of them need to show here, not just the first one.
+  /// When the message was sent TO the user, it's just the sender - Bcc is
+  /// intentionally never shown (the whole point of Bcc).
+  List<String> _counterpartsFor(EmailMessage message) {
+    if (message.senderEmail != _myEmail) return [message.senderEmail];
+    return [
+      message.recipientEmail,
+      ...message.cc,
+    ].where((e) => e.isNotEmpty && e != _myEmail).toSet().toList();
+  }
+
+  String _counterpartLabelFor(EmailMessage message) {
+    final others = _counterpartsFor(message);
+    if (others.isEmpty) return message.recipientEmail;
+    if (others.length <= 2) return others.join(', ');
+    return '${others.take(2).join(', ')} +${others.length - 2} more';
   }
 
   Widget _buildSubjectBar() {
@@ -493,7 +512,12 @@ class _MessageBubble extends StatelessWidget {
                       ),
                       const SizedBox(height: 1),
                       Text(
-                        'to ${message.recipientEmail}',
+                        // Includes Cc'd addresses too - a message sent to
+                        // several people has any extras beyond the first
+                        // "To" riding along as Cc (see compose_screen.dart's
+                        // _send()), so this needs all of them, not just the
+                        // recipient_email column.
+                        'to ${[message.recipientEmail, ...message.cc].join(', ')}',
                         style: TextStyle(fontSize: 10.5, color: Colors.white.withValues(alpha: 0.45)),
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -516,12 +540,198 @@ class _MessageBubble extends StatelessWidget {
                         message.body,
                         style: const TextStyle(fontSize: 15, height: 1.4, color: Colors.white),
                       ),
+                      if (message.hasAttachments) ...[
+                        const SizedBox(height: 10),
+                        _BubbleAttachments(
+                          attachments: message.attachments,
+                          accentBright: accentBright,
+                        ),
+                      ],
                     ],
                   ),
                 ),
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Attachments carried by a single message bubble: image attachments show
+/// as tappable thumbnails (fetched from the authenticated attachment
+/// endpoint), everything else shows as a small file chip with name and
+/// size. Tapping either opens the raw file in a full-screen viewer/browser
+/// tab depending on type.
+class _BubbleAttachments extends StatelessWidget {
+  final List<EmailAttachment> attachments;
+  final Color accentBright;
+  const _BubbleAttachments({required this.attachments, required this.accentBright});
+
+  @override
+  Widget build(BuildContext context) {
+    final images = attachments.where((a) => a.isImage).toList();
+    final files = attachments.where((a) => !a.isImage).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (images.isNotEmpty)
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: images.map((a) => _AttachmentThumbnail(attachment: a)).toList(),
+          ),
+        if (images.isNotEmpty && files.isNotEmpty) const SizedBox(height: 8),
+        if (files.isNotEmpty)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: files
+                .map((a) => Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: _AttachmentFileChip(attachment: a, accentBright: accentBright),
+                    ))
+                .toList(),
+          ),
+      ],
+    );
+  }
+}
+
+/// One image attachment, fetched via the authenticated attachment endpoint
+/// and shown as a rounded thumbnail. Tapping opens it full-screen.
+class _AttachmentThumbnail extends StatelessWidget {
+  final EmailAttachment attachment;
+  const _AttachmentThumbnail({required this.attachment});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Map<String, String>>(
+      future: apiService.attachmentHeaders(),
+      builder: (context, snapshot) {
+        final headers = snapshot.data;
+        return GestureDetector(
+          onTap: headers == null
+              ? null
+              : () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => _AttachmentImageViewer(attachment: attachment, headers: headers),
+                    ),
+                  ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: SizedBox(
+              width: 140,
+              height: 140,
+              child: headers == null
+                  ? const ColoredBox(color: Colors.black26)
+                  : Image.network(
+                      apiService.attachmentUri(attachment.id).toString(),
+                      headers: headers,
+                      fit: BoxFit.cover,
+                      loadingBuilder: (context, child, progress) {
+                        if (progress == null) return child;
+                        return const ColoredBox(
+                          color: Colors.black26,
+                          child: Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+                            ),
+                          ),
+                        );
+                      },
+                      errorBuilder: (context, error, stack) => const ColoredBox(
+                        color: Colors.black26,
+                        child: Center(
+                          child: Icon(CupertinoIcons.exclamationmark_triangle, color: Colors.white38, size: 22),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Full-screen viewer for a tapped image attachment.
+class _AttachmentImageViewer extends StatelessWidget {
+  final EmailAttachment attachment;
+  final Map<String, String> headers;
+  const _AttachmentImageViewer({required this.attachment, required this.headers});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text(attachment.originalName, overflow: TextOverflow.ellipsis),
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          child: Image.network(
+            apiService.attachmentUri(attachment.id).toString(),
+            headers: headers,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Non-image attachment (PDF, doc, etc.) shown as a small tappable chip
+/// with an icon, filename and size. Tapping opens it in the device browser,
+/// which is enough to view/download most common file types.
+class _AttachmentFileChip extends StatelessWidget {
+  final EmailAttachment attachment;
+  final Color accentBright;
+  const _AttachmentFileChip({required this.attachment, required this.accentBright});
+
+  IconData get _icon {
+    if (attachment.mimeType == 'application/pdf') return CupertinoIcons.doc_richtext;
+    return CupertinoIcons.doc;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => launchUrl(
+        apiService.attachmentUri(attachment.id),
+        mode: LaunchMode.externalApplication,
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.18),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: accentBright.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(_icon, size: 16, color: accentBright),
+            const SizedBox(width: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 160),
+              child: Text(
+                attachment.originalName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              attachment.formattedSize,
+              style: const TextStyle(fontSize: 10.5, color: Colors.white54),
+            ),
+          ],
         ),
       ),
     );

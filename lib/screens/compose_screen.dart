@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
@@ -21,15 +22,20 @@ class ComposeScreen extends StatefulWidget {
 }
 
 class _ComposeScreenState extends State<ComposeScreen> {
-  late final _toController = TextEditingController(
-    text: widget.replyTo?.senderEmail ?? '',
-  );
   late final _subjectController = TextEditingController(
     text: widget.replyTo != null ? _replySubject(widget.replyTo!.subject) : '',
   );
   final _bodyController = TextEditingController();
-  final _ccController = TextEditingController();
-  final _bccController = TextEditingController();
+
+  // Each of To/Cc/Bcc is a list of picked addresses (chips) - either chosen
+  // from the registered-user autocomplete dropdown, or typed and confirmed
+  // manually (the backend accepts any valid email via Cc/Bcc, and "To"
+  // needs to support emailing someone who isn't a registered user of this
+  // app too, since delivery goes out over real SMTP regardless).
+  late final List<String> _toRecipients =
+      widget.replyTo != null ? [widget.replyTo!.senderEmail] : [];
+  final List<String> _ccRecipients = [];
+  final List<String> _bccRecipients = [];
 
   bool _isSending = false;
   String? _errorMessage;
@@ -74,27 +80,15 @@ class _ComposeScreenState extends State<ComposeScreen> {
 
   @override
   void dispose() {
-    _toController.dispose();
     _subjectController.dispose();
     _bodyController.dispose();
-    _ccController.dispose();
-    _bccController.dispose();
     super.dispose();
   }
 
-  /// Splits a comma/semicolon-separated "a@x.com, b@y.com" field into a
-  /// clean list of addresses, same convention as the backend's own parser.
-  List<String> _splitAddresses(String raw) => raw
-      .split(RegExp(r'[,;]'))
-      .map((e) => e.trim())
-      .where((e) => e.isNotEmpty)
-      .toList();
-
   Future<void> _send() async {
-    final recipient = _toController.text.trim();
     final body = _bodyController.text.trim();
 
-    if (recipient.isEmpty || body.isEmpty) {
+    if (_toRecipients.isEmpty || body.isEmpty) {
       setState(() => _errorMessage = 'Recipient and message body are required');
       return;
     }
@@ -106,12 +100,16 @@ class _ComposeScreenState extends State<ComposeScreen> {
 
     try {
       await apiService.sendEmail(
-        recipientEmail: recipient,
+        recipientEmail: _toRecipients.first,
         subject: _subjectController.text.trim(),
         body: body,
         replyToId: widget.replyTo?.id,
-        cc: _splitAddresses(_ccController.text),
-        bcc: _splitAddresses(_bccController.text),
+        // Any additional "To" entries beyond the first ride along as Cc -
+        // the backend's recipient_email column is a single address, so
+        // this is how multiple direct recipients are supported (all of
+        // them still receive the real email via SMTP either way).
+        cc: [..._toRecipients.skip(1), ..._ccRecipients],
+        bcc: _bccRecipients,
         attachments: _attachments,
       );
       if (!mounted) return;
@@ -243,12 +241,14 @@ class _ComposeScreenState extends State<ComposeScreen> {
                     children: [
                       if (!_isReply) ...[
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Expanded(
-                              child: GlassTextField(
-                                placeholder: 'To',
-                                controller: _toController,
-                                prefixIcon: const Icon(CupertinoIcons.at, size: 18, color: Colors.white54),
+                              child: _RecipientField(
+                                label: 'To',
+                                icon: CupertinoIcons.at,
+                                recipients: _toRecipients,
+                                onChanged: () => setState(() {}),
                               ),
                             ),
                             if (!_showCcBcc) ...[
@@ -268,16 +268,18 @@ class _ComposeScreenState extends State<ComposeScreen> {
                         ),
                         if (_showCcBcc) ...[
                           const SizedBox(height: 12),
-                          GlassTextField(
-                            placeholder: 'Cc',
-                            controller: _ccController,
-                            prefixIcon: const Icon(CupertinoIcons.person_2, size: 18, color: Colors.white54),
+                          _RecipientField(
+                            label: 'Cc',
+                            icon: CupertinoIcons.person_2,
+                            recipients: _ccRecipients,
+                            onChanged: () => setState(() {}),
                           ),
                           const SizedBox(height: 12),
-                          GlassTextField(
-                            placeholder: 'Bcc',
-                            controller: _bccController,
-                            prefixIcon: const Icon(CupertinoIcons.eye_slash, size: 18, color: Colors.white54),
+                          _RecipientField(
+                            label: 'Bcc',
+                            icon: CupertinoIcons.eye_slash,
+                            recipients: _bccRecipients,
+                            onChanged: () => setState(() {}),
                           ),
                         ],
                         const SizedBox(height: 12),
@@ -419,6 +421,369 @@ class _ComposeToolButton extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A To/Cc/Bcc field: picked addresses show as removable chips, with a
+/// text box alongside for typing the next one. As the user types (2+
+/// chars), a debounced search hits the registered-users autocomplete
+/// endpoint and shows matches in a dropdown below the field - tapping one
+/// adds it as a chip, Gmail-style. Pressing enter/done on a manually typed
+/// address that looks like a valid email adds it directly too, since the
+/// backend accepts any address via Cc/Bcc (and To isn't limited to
+/// registered users either - real delivery goes out over SMTP regardless).
+class _RecipientField extends StatefulWidget {
+  final String label;
+  final IconData icon;
+  final List<String> recipients;
+  final VoidCallback onChanged;
+  const _RecipientField({
+    required this.label,
+    required this.icon,
+    required this.recipients,
+    required this.onChanged,
+  });
+
+  @override
+  State<_RecipientField> createState() => _RecipientFieldState();
+}
+
+class _RecipientFieldState extends State<_RecipientField> {
+  final _controller = TextEditingController();
+  final _focusNode = FocusNode();
+  final _layerLink = LayerLink();
+  final _fieldKey = GlobalKey();
+
+  Timer? _debounce;
+  List<UserSuggestion> _suggestions = [];
+  bool _isSearching = false;
+  OverlayEntry? _overlayEntry;
+
+  static const _accentBright = Color(0xFF00E5FF);
+  static final _emailPattern = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _removeOverlay();
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _onTextChanged(String text) {
+    _debounce?.cancel();
+    final query = text.trim();
+    if (query.length < 2) {
+      setState(() {
+        _suggestions = [];
+        _isSearching = false;
+      });
+      _updateOverlay();
+      return;
+    }
+    setState(() => _isSearching = true);
+    _debounce = Timer(const Duration(milliseconds: 300), () async {
+      try {
+        final results = await apiService.searchUsers(query);
+        if (!mounted) return;
+        // Don't suggest someone already picked in this field.
+        final already = widget.recipients.toSet();
+        setState(() {
+          _suggestions = results.where((u) => !already.contains(u.email)).toList();
+          _isSearching = false;
+        });
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _suggestions = [];
+          _isSearching = false;
+        });
+      }
+      _updateOverlay();
+    });
+  }
+
+  void _addRecipient(String email) {
+    final clean = email.trim();
+    if (clean.isEmpty || widget.recipients.contains(clean)) {
+      _controller.clear();
+      setState(() => _suggestions = []);
+      _updateOverlay();
+      return;
+    }
+    widget.recipients.add(clean);
+    _controller.clear();
+    setState(() => _suggestions = []);
+    widget.onChanged();
+    _updateOverlay();
+  }
+
+  void _removeRecipient(String email) {
+    widget.recipients.remove(email);
+    widget.onChanged();
+  }
+
+  /// Confirms whatever's currently typed as a chip, if it looks like a
+  /// valid email - called only on an explicit submit (keyboard "done"/
+  /// enter). Deliberately NOT called on losing focus: silently turning
+  /// whatever's mid-typed into a chip the moment the user taps elsewhere is
+  /// surprising (it skips the suggestion step entirely) - tapping a
+  /// suggestion or pressing done are the only two ways to commit an address.
+  void _confirmTypedText() {
+    final text = _controller.text.trim();
+    if (_emailPattern.hasMatch(text)) {
+      _addRecipient(text);
+    }
+  }
+
+  void _showOverlay() {
+    _removeOverlay();
+    // Anchored to the field's own current height (rather than a fixed
+    // offset) so the dropdown still lands right below the input row even
+    // when a chips row above it has made the field taller.
+    final box = _fieldKey.currentContext?.findRenderObject() as RenderBox?;
+    final fieldHeight = box?.size.height ?? 44;
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        width: 280,
+        child: CompositedTransformFollower(
+          link: _layerLink,
+          showWhenUnlinked: false,
+          offset: Offset(0, fieldHeight + 4),
+          child: _SuggestionDropdown(
+            suggestions: _suggestions,
+            isSearching: _isSearching,
+            onSelected: (user) => _addRecipient(user.email),
+          ),
+        ),
+      ),
+    );
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _updateOverlay() {
+    final shouldShow = _focusNode.hasFocus && (_suggestions.isNotEmpty || _isSearching);
+    if (shouldShow) {
+      if (_overlayEntry == null) {
+        _showOverlay();
+      } else {
+        _overlayEntry!.markNeedsBuild();
+      }
+    } else {
+      _removeOverlay();
+    }
+  }
+
+  void _removeOverlay() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: Container(
+        key: _fieldKey,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        // Chips (if any) get their own wrapped row above the input, and the
+        // text box always spans the full remaining width on its own row -
+        // rather than packing the icon/chips/input into one Wrap, where a
+        // fixed-width input box made typed text visually scroll sideways
+        // inside its own tiny box instead of wrapping like the chips do.
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (widget.recipients.isNotEmpty) ...[
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final email in widget.recipients)
+                    _RecipientChip(email: email, onRemove: () => _removeRecipient(email)),
+                ],
+              ),
+              const SizedBox(height: 6),
+            ],
+            Row(
+              children: [
+                Icon(widget.icon, size: 16, color: Colors.white54),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Focus(
+                    onFocusChange: (hasFocus) {
+                      if (!hasFocus) {
+                        // Losing focus discards unconfirmed text rather than
+                        // silently turning it into a chip - only tapping a
+                        // suggestion or pressing done/enter commits one.
+                        _controller.clear();
+                        setState(() => _suggestions = []);
+                        _removeOverlay();
+                      } else {
+                        _updateOverlay();
+                      }
+                    },
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      onChanged: _onTextChanged,
+                      onSubmitted: (_) => _confirmTypedText(),
+                      style: const TextStyle(fontSize: 14, color: Colors.white),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        isCollapsed: true,
+                        border: InputBorder.none,
+                        hintText: widget.recipients.isEmpty ? widget.label : null,
+                        hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One picked recipient, shown as a small removable pill inside a
+/// [_RecipientField].
+class _RecipientChip extends StatelessWidget {
+  final String email;
+  final VoidCallback onRemove;
+  const _RecipientChip({required this.email, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.only(left: 10, right: 4, top: 4, bottom: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF00E5FF).withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 140),
+            child: Text(
+              email,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+            ),
+          ),
+          GestureDetector(
+            onTap: onRemove,
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(CupertinoIcons.xmark, size: 12, color: Colors.white70),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Dropdown of registered-user matches shown below a [_RecipientField]
+/// while the person types, Gmail-style.
+class _SuggestionDropdown extends StatelessWidget {
+  final List<UserSuggestion> suggestions;
+  final bool isSearching;
+  final ValueChanged<UserSuggestion> onSelected;
+  const _SuggestionDropdown({
+    required this.suggestions,
+    required this.isSearching,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(maxHeight: 220),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1C1B2E),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+          boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 16, offset: Offset(0, 6))],
+        ),
+        child: isSearching
+            ? const Padding(
+                padding: EdgeInsets.all(14),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00E5FF)),
+                    ),
+                    SizedBox(width: 10),
+                    Text('Searching…', style: TextStyle(color: Colors.white54, fontSize: 13)),
+                  ],
+                ),
+              )
+            : suggestions.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(14),
+                    child: Text('No matches', style: TextStyle(color: Colors.white38, fontSize: 13)),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    itemCount: suggestions.length,
+                    itemBuilder: (context, index) {
+                      final user = suggestions[index];
+                      return InkWell(
+                        onTap: () => onSelected(user),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 14,
+                                backgroundColor: const Color(0xFF6C5CE7),
+                                child: Text(
+                                  user.fullName.isNotEmpty ? user.fullName[0].toUpperCase() : '?',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.white),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      user.fullName,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white),
+                                    ),
+                                    Text(
+                                      user.email,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 11.5, color: Colors.white54),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
       ),
     );
   }

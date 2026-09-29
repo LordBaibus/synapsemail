@@ -21,6 +21,19 @@ class PendingAttachment {
   int get sizeBytes => bytes.length;
 }
 
+/// One registered-user match returned by [ApiService.searchUsers], used to
+/// populate the To/Cc/Bcc autocomplete dropdown on the compose screen.
+class UserSuggestion {
+  final String fullName;
+  final String email;
+  const UserSuggestion({required this.fullName, required this.email});
+
+  factory UserSuggestion.fromJson(Map<String, dynamic> json) => UserSuggestion(
+        fullName: json['full_name'] as String? ?? '',
+        email: json['email'] as String? ?? '',
+      );
+}
+
 class ApiException implements Exception {
   final String message;
   ApiException(this.message);
@@ -244,6 +257,23 @@ class ApiService {
     final list = data['messages'] as List<dynamic>;
     return list
         .map((e) => EmailMessage.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Searches registered users by partial name/email match, for the
+  /// To/Cc/Bcc autocomplete dropdown. Returns an empty list for queries
+  /// under 2 characters (mirrors the backend's own early-return - no need
+  /// to round-trip for a single keystroke).
+  Future<List<UserSuggestion>> searchUsers(String query) async {
+    if (query.trim().length < 2) return const [];
+    final response = await http.get(
+      _uri('search_users.php', {'q': query.trim()}),
+      headers: await _headers(auth: true),
+    );
+    final data = _decode(response);
+    final list = data['users'] as List<dynamic>? ?? [];
+    return list
+        .map((e) => UserSuggestion.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
