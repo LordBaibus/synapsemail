@@ -56,7 +56,13 @@ dependencies:
   # lets the user pick "Save Image"/"Save to Files" - a plain URL can't do
   # that since it doesn't carry our app's auth, and file_picker only reads
   # files, it doesn't write/export them.
-  share_plus: ^10.1.4
+  #
+  # Pinned to 11.0.0+ specifically: that's the version that introduced the
+  # SharePlus.instance.share(ShareParams(...)) API this code uses - 10.x
+  # (the first version tried here) only has the older, now-deprecated
+  # Share.shareXFiles() static API, which is why the build failed with
+  # "Undefined name 'SharePlus'" even after a full flutter clean.
+  share_plus: ^11.0.0
 
   # share_plus's ShareParams takes a list of XFile - this is the package
   # XFile actually lives in (share_plus builds on it but doesn't re-export
