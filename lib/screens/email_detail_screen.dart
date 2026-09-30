@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:cross_file/cross_file.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -57,6 +58,18 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
   // preview above the composer before sending.
   EmailMessage? _replyTarget;
 
+  // Files staged for the NEXT reply from this thread's composer - separate
+  // from the full compose screen's own attachment list, since this is a
+  // different screen/state entirely. Cleared after a successful send.
+  final List<PendingAttachment> _attachments = [];
+  bool _isPickingFiles = false;
+
+  // Anchors the glass attach-menu popup to the "+" button so it opens right
+  // above it (same LayerLink/OverlayEntry pattern compose_screen.dart uses
+  // for its recipient-suggestion dropdown).
+  final _attachButtonLink = LayerLink();
+  OverlayEntry? _attachMenuEntry;
+
   @override
   void initState() {
     super.initState();
@@ -68,6 +81,7 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
     _replyController.dispose();
     _scrollController.dispose();
     _replyFocusNode.dispose();
+    _removeAttachMenu();
     super.dispose();
   }
 
@@ -117,7 +131,10 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
   Future<void> _sendReply() async {
     final text = _replyController.text.trim();
     final anchor = _replyTarget ?? (_messages.isNotEmpty ? _latest : null);
-    if (text.isEmpty || anchor == null) return;
+    // A reply with no typed text but at least one attachment is still a
+    // valid send (Messenger-style "just a photo") - only block when BOTH
+    // are empty.
+    if ((text.isEmpty && _attachments.isEmpty) || anchor == null) return;
 
     final recipient = anchor.senderEmail == _myEmail ? anchor.recipientEmail : anchor.senderEmail;
     final subject = anchor.subject.toLowerCase().startsWith('re:') ? anchor.subject : 'Re: ${anchor.subject}';
@@ -133,12 +150,14 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
         subject: subject,
         body: text,
         replyToId: anchor.id,
+        attachments: _attachments,
       );
       _replyController.clear();
       final messages = await apiService.fetchThread(widget.emailId);
       if (!mounted) return;
       setState(() {
         _messages = messages;
+        _attachments.clear();
         // Back to replying to the newest message by default until the
         // user picks a specific one again.
         _replyTarget = messages.isNotEmpty ? messages.last : null;
@@ -151,6 +170,96 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
+  }
+
+  /// Runs one of file_picker's pick modes and stages the result for the
+  /// next reply - mirrors compose_screen.dart's _pickAttachments, kept as
+  /// its own copy here since this screen has its own separate attachment
+  /// list scoped to the thread reply bar.
+  Future<void> _pickComposerAttachments(FileType type) async {
+    _removeAttachMenu();
+    setState(() => _isPickingFiles = true);
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: type,
+        withData: true,
+      );
+      if (result == null) return;
+
+      final picked = <PendingAttachment>[];
+      for (final file in result.files) {
+        final bytes = file.bytes;
+        if (bytes == null) continue;
+        picked.add(PendingAttachment(fileName: file.name, bytes: bytes, mimeType: null));
+      }
+
+      final currentTotal = _attachments.fold<int>(0, (sum, a) => sum + a.sizeBytes);
+      final newTotal = currentTotal + picked.fold<int>(0, (sum, a) => sum + a.sizeBytes);
+      if (newTotal > ApiService.maxAttachmentsBytes) {
+        setState(() => _sendError = 'Attachments are too large (max 30MB total)');
+        return;
+      }
+
+      setState(() {
+        _attachments.addAll(picked);
+        _sendError = null;
+      });
+    } finally {
+      if (mounted) setState(() => _isPickingFiles = false);
+    }
+  }
+
+  void _removeComposerAttachment(PendingAttachment attachment) {
+    setState(() => _attachments.remove(attachment));
+  }
+
+  void _toggleAttachMenu() {
+    if (_attachMenuEntry != null) {
+      _removeAttachMenu();
+    } else {
+      _showAttachMenu();
+    }
+  }
+
+  void _showAttachMenu() {
+    _removeAttachMenu();
+    _attachMenuEntry = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          // Full-screen transparent barrier so tapping anywhere outside the
+          // menu closes it, same as a standard popup menu.
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: _removeAttachMenu,
+            ),
+          ),
+          CompositedTransformFollower(
+            link: _attachButtonLink,
+            showWhenUnlinked: false,
+            // Anchored by its right edge, growing upward-and-leftward from
+            // the attach button's top-right corner - the button sits near
+            // the right side of the screen (beside Send), so anchoring by
+            // the left edge instead would push most of a 200px-wide menu
+            // off the right edge of the screen.
+            targetAnchor: Alignment.topRight,
+            followerAnchor: Alignment.bottomRight,
+            offset: const Offset(0, -8),
+            child: _GlassAttachMenu(
+              onInsertImage: () => _pickComposerAttachments(FileType.media),
+              onAddAttachment: () => _pickComposerAttachments(FileType.any),
+            ),
+          ),
+        ],
+      ),
+    );
+    Overlay.of(context).insert(_attachMenuEntry!);
+  }
+
+  void _removeAttachMenu() {
+    _attachMenuEntry?.remove();
+    _attachMenuEntry = null;
   }
 
   Future<void> _deleteMessage(EmailMessage message) async {
@@ -394,6 +503,14 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
                   style: const TextStyle(color: Color(0xFFFF6961), fontSize: 12),
                 ),
               ),
+            if (_attachments.isNotEmpty) ...[
+              _ComposerAttachmentChips(
+                attachments: _attachments,
+                accentBright: _accentBright,
+                onRemove: _removeComposerAttachment,
+              ),
+              const SizedBox(height: 8),
+            ],
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -406,6 +523,29 @@ class _EmailDetailScreenState extends State<EmailDetailScreen> {
                     maxLines: 4,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _isSending ? null : _sendReply(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Attach button, right beside the send button - tapping it
+                // expands a small glass popup menu with "Insert Image" and
+                // "Add Attachment" instead of guessing which picker the
+                // user wants.
+                CompositedTransformTarget(
+                  link: _attachButtonLink,
+                  child: GlassButton.custom(
+                    onTap: _isPickingFiles ? () {} : _toggleAttachMenu,
+                    width: 44,
+                    height: 44,
+                    shape: const LiquidRoundedSuperellipse(borderRadius: 22),
+                    child: Center(
+                      child: _isPickingFiles
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: _accentBright),
+                            )
+                          : const Icon(CupertinoIcons.paperclip, color: _accentBright, size: 20),
+                    ),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -871,6 +1011,145 @@ class _DateDivider extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Small glass-styled popup menu shown above the thread composer's attach
+/// button, offering the same two picker modes compose_screen.dart's
+/// standalone Photos/Files buttons do - Gmail/Messenger-style, condensed
+/// into one menu since there's only room for a single "+" button here.
+class _GlassAttachMenu extends StatelessWidget {
+  final VoidCallback onInsertImage;
+  final VoidCallback onAddAttachment;
+  const _GlassAttachMenu({required this.onInsertImage, required this.onAddAttachment});
+
+  static const _accentBright = Color(0xFF00E5FF);
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: GlassPanel(
+        useOwnLayer: true,
+        shape: const LiquidRoundedSuperellipse(borderRadius: 18),
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: SizedBox(
+          width: 200,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _MenuRow(
+                icon: CupertinoIcons.photo,
+                label: 'Insert Image',
+                onTap: onInsertImage,
+              ),
+              Divider(height: 1, color: Colors.white.withValues(alpha: 0.08)),
+              _MenuRow(
+                icon: CupertinoIcons.paperclip,
+                label: 'Add Attachment',
+                onTap: onAddAttachment,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MenuRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _MenuRow({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, size: 17, color: _GlassAttachMenu._accentBright),
+            const SizedBox(width: 12),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Horizontally-wrapped chips for files staged for the thread's next reply,
+/// shown above the reply bar once something's picked - mirrors
+/// compose_screen.dart's _AttachmentChips (kept as its own copy since that
+/// one is private to the other file).
+class _ComposerAttachmentChips extends StatelessWidget {
+  final List<PendingAttachment> attachments;
+  final Color accentBright;
+  final ValueChanged<PendingAttachment> onRemove;
+  const _ComposerAttachmentChips({
+    required this.attachments,
+    required this.accentBright,
+    required this.onRemove,
+  });
+
+  IconData _iconFor(String fileName) {
+    final ext = fileName.split('.').last.toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic'].contains(ext)) {
+      return CupertinoIcons.photo;
+    }
+    if (ext == 'pdf') return CupertinoIcons.doc_richtext;
+    return CupertinoIcons.doc;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: attachments.map((a) {
+        final sizeMb = a.sizeBytes / (1024 * 1024);
+        final sizeLabel = sizeMb >= 1
+            ? '${sizeMb.toStringAsFixed(1)} MB'
+            : '${(a.sizeBytes / 1024).toStringAsFixed(0)} KB';
+        return Container(
+          padding: const EdgeInsets.only(left: 10, right: 6, top: 6, bottom: 6),
+          decoration: BoxDecoration(
+            color: accentBright.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: accentBright.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_iconFor(a.fileName), size: 14, color: accentBright),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 120),
+                child: Text(
+                  a.fileName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(sizeLabel, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onTap: () => onRemove(a),
+                child: const Icon(CupertinoIcons.xmark_circle_fill, size: 16, color: Colors.white38),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
     );
   }
 }
