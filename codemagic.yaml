@@ -16,10 +16,6 @@ workflows:
       - name: Install Flutter dependencies
         script: flutter pub get
 
-      # Regenerates ios/Runner/Assets.xcassets launcher icons from
-      # assets/icon/app_icon.png per the flutter_launcher_icons config in
-      # pubspec.yaml - keeps CI builds in sync with local ones without
-      # committing every generated platform icon file to the repo.
       - name: Generate launcher icons
         script: dart run flutter_launcher_icons
 
